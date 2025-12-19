@@ -123,23 +123,24 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False):
 
 
 def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
-                      num_scales=10, return_diagnostics=False):
+                      num_scales=10, method='binary', q=2, weights=None,
+                      mask=None, min_observed_fraction=0.5,
+                      return_diagnostics=False):
     """
-    Measure the fractal dimension of a 2D or 3D field using the box-counting method.
+    Measure the fractal dimension of a 2D or 3D field using box-counting methods.
 
-    This function estimates the fractal (box-counting) dimension by counting how
-    many boxes of varying sizes contain values above a threshold. The dimension
-    is computed from the power-law relationship: N(ε) ~ ε^(-D), where N is the
-    number of occupied boxes and ε is the box size.
+    This unified function supports both binary (threshold-based) and mass-based
+    box-counting methods for estimating fractal dimensions. It also supports
+    spatial weighting and masking for handling incomplete observations.
 
     Parameters
     ----------
     field : ndarray
         Input field (2D or 3D array) to analyze.
     threshold : float, optional
-        Threshold value for determining occupied boxes. Boxes with mean values
-        above this threshold are counted as occupied. If None, uses the median
-        of non-zero values. Default is None.
+        Threshold value for determining occupied boxes (binary method only).
+        Boxes with mean values above this threshold are counted as occupied.
+        If None, uses the median of non-zero values. Default is None.
     min_box_size : int, optional
         Minimum box size to use (in pixels/voxels). Must be >= 2. Default is 2.
     max_box_size : int, optional
@@ -147,9 +148,33 @@ def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
         Default is None.
     num_scales : int, optional
         Number of different box sizes to test. Default is 10.
+    method : str, optional
+        Method for dimension estimation:
+        - 'binary': Threshold-based box counting. Counts boxes where mean > threshold.
+        - 'mass': Mass-based method using partition functions. Accounts for field
+          intensity rather than just spatial occupancy.
+        Default is 'binary'.
+    q : float, optional
+        Order of the generalized dimension (mass method only). Common values:
+        - q=0: Capacity dimension (counts non-empty boxes)
+        - q=1: Information dimension (entropy-based)
+        - q=2: Correlation dimension (default, recommended)
+        Higher q values emphasize high-density regions. Default is 2.
+    weights : ndarray, optional
+        Spatial weight array with same shape as field. Each pixel/voxel's
+        contribution is multiplied by its weight. Useful for emphasizing
+        certain regions. If None, uniform weighting is used. Default is None.
+    mask : ndarray, optional
+        Boolean or binary array with same shape as field indicating observed
+        regions. True/1 = observed, False/0 = masked/unobserved. The function
+        corrects for partial coverage in each box. If None, all regions are
+        considered observed. Default is None.
+    min_observed_fraction : float, optional
+        Minimum fraction of a box that must be observed (unmasked) to include
+        it in the analysis. Boxes with less coverage are excluded. Must be
+        between 0 and 1. Default is 0.5.
     return_diagnostics : bool, optional
-        If True, returns additional diagnostic information including box sizes,
-        counts, and fit quality. Default is False.
+        If True, returns additional diagnostic information. Default is False.
 
     Returns
     -------
@@ -158,10 +183,14 @@ def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
     diagnostics : dict, optional
         Only returned if return_diagnostics=True. Contains:
         - 'box_sizes': array of box sizes used
-        - 'box_counts': array of occupied box counts
-        - 'slope': fitted slope (-dimension)
+        - 'box_counts' or 'partition_sums': array of counts/partition values
+        - 'slope': fitted slope
         - 'intercept': y-intercept of the fit
         - 'r_squared': coefficient of determination for the fit
+        - 'method': the method used
+        - 'threshold_used': threshold value (binary method only)
+        - 'q': the q value (mass method only)
+        - 'mask_correction_applied': whether mask correction was used
 
     Raises
     ------
@@ -170,29 +199,88 @@ def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
 
     Examples
     --------
-    >>> # Create a simple fractal field
+    >>> # Binary box-counting (default)
     >>> weights = np.array([0.1, 0.2, 0.3, 0.4])
     >>> field, _ = multifrac(weights, dim=2, size=2, levels=5)
     >>> dimension = fractal_dimension(field)
-    >>> print(f"Fractal dimension: {dimension:.3f}")
 
-    >>> # Get detailed diagnostics
-    >>> dim, diag = fractal_dimension(field, return_diagnostics=True)
-    >>> print(f"R² of fit: {diag['r_squared']:.4f}")
+    >>> # Mass-based method
+    >>> dimension = fractal_dimension(field, method='mass', q=2)
+
+    >>> # With spatial weighting
+    >>> weights = np.exp(-field)  # Example: inverse intensity weighting
+    >>> dimension = fractal_dimension(field, weights=weights)
+
+    >>> # With mask for unobserved regions
+    >>> mask = np.random.random(field.shape) > 0.2  # 80% observed
+    >>> dimension = fractal_dimension(field, mask=mask, min_observed_fraction=0.3)
     """
     # Input validation
-    field = np.asarray(field)
-    dim = len(field.shape)
+    field = np.asarray(field, dtype=float)
+    ndim = len(field.shape)
 
-    if dim not in [2, 3]:
+    if ndim not in [2, 3]:
         raise ValueError(f'Field must be 2D or 3D. Got shape: {field.shape}')
 
     if min_box_size < 2:
         raise ValueError(f'min_box_size must be >= 2. Got: {min_box_size}')
 
-    # Set default threshold if not provided
-    if threshold is None:
-        non_zero = field[field > 0]
+    if method not in ['binary', 'mass']:
+        raise ValueError(f"method must be 'binary' or 'mass'. Got: {method}")
+
+    if not 0 <= min_observed_fraction <= 1:
+        raise ValueError(
+            f'min_observed_fraction must be between 0 and 1. Got: {min_observed_fraction}'
+        )
+
+    # Validate and process weights
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        if weights.shape != field.shape:
+            raise ValueError(
+                f'weights shape {weights.shape} must match field shape {field.shape}'
+            )
+        if np.any(weights < 0):
+            raise ValueError('weights must be non-negative')
+
+    # Validate and process mask
+    mask_applied = False
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != field.shape:
+            raise ValueError(
+                f'mask shape {mask.shape} must match field shape {field.shape}'
+            )
+        mask_applied = True
+        # Check that we have some observed data
+        if not np.any(mask):
+            raise ValueError('mask must have at least some True (observed) values')
+    else:
+        # No mask - all pixels observed
+        mask = np.ones(field.shape, dtype=bool)
+
+    # Apply weights to field if provided
+    if weights is not None:
+        weighted_field = field * weights
+    else:
+        weighted_field = field.copy()
+
+    # For mass method, validate field values
+    if method == 'mass':
+        if np.any(weighted_field[mask] < 0):
+            raise ValueError('Field must contain non-negative values for mass-based analysis')
+        # Normalize to sum to 1 (treating as mass distribution), considering only observed
+        total_mass = np.sum(weighted_field[mask])
+        if total_mass == 0:
+            raise ValueError('Field has zero total mass in observed regions')
+        field_norm = weighted_field / total_mass
+    else:
+        field_norm = weighted_field
+
+    # Set default threshold for binary method
+    if method == 'binary' and threshold is None:
+        observed_values = field_norm[mask]
+        non_zero = observed_values[observed_values > 0]
         if len(non_zero) > 0:
             threshold = np.median(non_zero)
         else:
@@ -224,87 +312,290 @@ def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
     )
     box_sizes = np.unique(box_sizes)  # Remove duplicates from rounding
 
-    box_counts = []
-
-    # Count occupied boxes for each box size
-    for box_size in box_sizes:
-        count = 0
-
-        if dim == 2:
-            # 2D case
-            for i in range(0, field.shape[0], box_size):
-                for j in range(0, field.shape[1], box_size):
-                    # Extract box, handling edge cases
-                    box = field[i:i+box_size, j:j+box_size]
-                    # Count box as occupied if mean exceeds threshold
-                    if np.mean(box) > threshold:
-                        count += 1
-
-        else:  # dim == 3
-            # 3D case
-            for i in range(0, field.shape[0], box_size):
-                for j in range(0, field.shape[1], box_size):
-                    for k in range(0, field.shape[2], box_size):
-                        # Extract box, handling edge cases
-                        box = field[i:i+box_size, j:j+box_size, k:k+box_size]
-                        # Count box as occupied if mean exceeds threshold
-                        if np.mean(box) > threshold:
-                            count += 1
-
-        box_counts.append(count)
-
-    box_counts = np.array(box_counts)
-
-    # Remove any zero counts (would cause log issues)
-    valid_mask = box_counts > 0
-    box_sizes_valid = box_sizes[valid_mask]
-    box_counts_valid = box_counts[valid_mask]
-
-    if len(box_sizes_valid) < 2:
-        raise ValueError(
-            'Not enough valid data points for fractal dimension estimation. '
-            'Try adjusting threshold or box size parameters.'
+    # Process boxes based on method
+    if method == 'binary':
+        result_values = _binary_box_counting(
+            field_norm, mask, box_sizes, threshold, min_observed_fraction, ndim
         )
+        result_key = 'box_counts'
+    else:  # method == 'mass'
+        result_values = _mass_box_counting(
+            field_norm, mask, box_sizes, q, min_observed_fraction, ndim
+        )
+        result_key = 'partition_sums'
 
-    # Fit log(N) vs log(1/ε) to get dimension
-    # N(ε) ~ ε^(-D) => log(N) = -D * log(ε) + const
-    log_scales = np.log(box_sizes_valid)
-    log_counts = np.log(box_counts_valid)
+    result_values = np.array(result_values)
 
-    # Linear regression
-    coeffs = np.polyfit(log_scales, log_counts, 1)
-    slope, intercept = coeffs
+    # Handle fitting based on method
+    if method == 'binary':
+        # Remove any zero counts
+        valid_idx = result_values > 0
+        box_sizes_valid = box_sizes[valid_idx]
+        values_valid = result_values[valid_idx]
 
-    # The fractal dimension is the negative of the slope
-    dimension = -slope
+        if len(box_sizes_valid) < 2:
+            raise ValueError(
+                'Not enough valid data points for fractal dimension estimation. '
+                'Try adjusting threshold or box size parameters.'
+            )
+
+        log_scales = np.log(box_sizes_valid)
+        log_values = np.log(values_valid)
+
+        # Linear regression: log(N) = -D * log(ε) + const
+        coeffs = np.polyfit(log_scales, log_values, 1)
+        slope, intercept = coeffs
+        dimension = -slope
+
+    else:  # method == 'mass'
+        if q == 1:
+            # For q=1 (information dimension), values are already log-like
+            valid_idx = result_values != 0
+            box_sizes_valid = box_sizes[valid_idx]
+            values_valid = result_values[valid_idx]
+
+            if len(box_sizes_valid) < 2:
+                raise ValueError(
+                    'Not enough valid data points for dimension estimation. '
+                    'Try adjusting box size parameters.'
+                )
+
+            log_scales = np.log(box_sizes_valid)
+            log_values = values_valid  # Already in log-form for q=1
+        else:
+            # General case
+            valid_idx = result_values > 0
+            box_sizes_valid = box_sizes[valid_idx]
+            values_valid = result_values[valid_idx]
+
+            if len(box_sizes_valid) < 2:
+                raise ValueError(
+                    'Not enough valid data points for dimension estimation. '
+                    'Try adjusting box size parameters.'
+                )
+
+            log_scales = np.log(box_sizes_valid)
+            log_values = np.log(values_valid)
+
+        # Linear regression
+        coeffs = np.polyfit(log_scales, log_values, 1)
+        slope, intercept = coeffs
+
+        # Extract dimension based on q
+        if q == 1:
+            dimension = -slope
+        else:
+            dimension = slope / (q - 1)
 
     # Calculate R² for goodness of fit
-    log_counts_pred = slope * log_scales + intercept
-    ss_res = np.sum((log_counts - log_counts_pred) ** 2)
-    ss_tot = np.sum((log_counts - np.mean(log_counts)) ** 2)
+    log_values_pred = slope * log_scales + intercept
+    ss_res = np.sum((log_values - log_values_pred) ** 2)
+    ss_tot = np.sum((log_values - np.mean(log_values)) ** 2)
     r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
 
-    print(f'Fractal dimension (box-counting): {dimension:.4f}')
+    if method == 'binary':
+        print(f'Fractal dimension (box-counting): {dimension:.4f}')
+    else:
+        print(f'Mass-based fractal dimension D_{q} = {dimension:.4f}')
     print(f'Fit quality (R²): {r_squared:.4f}')
+    if mask_applied:
+        print(f'Mask correction applied (min_observed_fraction={min_observed_fraction})')
 
     if return_diagnostics:
         diagnostics = {
             'box_sizes': box_sizes_valid,
-            'box_counts': box_counts_valid,
+            result_key: values_valid,
             'slope': slope,
             'intercept': intercept,
             'r_squared': r_squared,
-            'threshold_used': threshold
+            'method': method,
+            'mask_correction_applied': mask_applied
         }
+        if method == 'binary':
+            diagnostics['threshold_used'] = threshold
+        else:
+            diagnostics['q'] = q
+
         return dimension, diagnostics
 
     return dimension
+
+
+def _binary_box_counting(field, mask, box_sizes, threshold, min_observed_fraction, ndim):
+    """
+    Perform binary box counting with mask support.
+
+    Parameters
+    ----------
+    field : ndarray
+        The field to analyze.
+    mask : ndarray
+        Boolean mask where True = observed.
+    box_sizes : array-like
+        Box sizes to use.
+    threshold : float
+        Threshold for occupancy.
+    min_observed_fraction : float
+        Minimum fraction of box that must be observed.
+    ndim : int
+        Number of dimensions (2 or 3).
+
+    Returns
+    -------
+    box_counts : list
+        Count of occupied boxes for each box size.
+    """
+    box_counts = []
+
+    for box_size in box_sizes:
+        count = 0
+
+        if ndim == 2:
+            for i in range(0, field.shape[0], box_size):
+                for j in range(0, field.shape[1], box_size):
+                    box_field = field[i:i+box_size, j:j+box_size]
+                    box_mask = mask[i:i+box_size, j:j+box_size]
+
+                    # Calculate observed fraction
+                    observed_fraction = np.mean(box_mask)
+                    if observed_fraction < min_observed_fraction:
+                        continue  # Skip boxes with insufficient coverage
+
+                    # Calculate mean of observed pixels only
+                    observed_pixels = box_field[box_mask]
+                    if len(observed_pixels) > 0:
+                        box_mean = np.mean(observed_pixels)
+                        if box_mean > threshold:
+                            count += 1
+        else:  # ndim == 3
+            for i in range(0, field.shape[0], box_size):
+                for j in range(0, field.shape[1], box_size):
+                    for k in range(0, field.shape[2], box_size):
+                        box_field = field[i:i+box_size, j:j+box_size, k:k+box_size]
+                        box_mask = mask[i:i+box_size, j:j+box_size, k:k+box_size]
+
+                        # Calculate observed fraction
+                        observed_fraction = np.mean(box_mask)
+                        if observed_fraction < min_observed_fraction:
+                            continue
+
+                        # Calculate mean of observed pixels only
+                        observed_pixels = box_field[box_mask]
+                        if len(observed_pixels) > 0:
+                            box_mean = np.mean(observed_pixels)
+                            if box_mean > threshold:
+                                count += 1
+
+        box_counts.append(count)
+
+    return box_counts
+
+
+def _mass_box_counting(field_norm, mask, box_sizes, q, min_observed_fraction, ndim):
+    """
+    Perform mass-based box counting with mask support.
+
+    The mask correction works by estimating the total mass in each box from
+    the observed portion. If a box has observed fraction f, the observed mass
+    m_obs is scaled by 1/f to estimate the total mass: m_est = m_obs / f.
+
+    Parameters
+    ----------
+    field_norm : ndarray
+        The normalized field (sums to 1 over observed region).
+    mask : ndarray
+        Boolean mask where True = observed.
+    box_sizes : array-like
+        Box sizes to use.
+    q : float
+        Order of generalized dimension.
+    min_observed_fraction : float
+        Minimum fraction of box that must be observed.
+    ndim : int
+        Number of dimensions (2 or 3).
+
+    Returns
+    -------
+    partition_sums : list
+        Partition function values for each box size.
+    """
+    partition_sums = []
+
+    for box_size in box_sizes:
+        masses = []
+
+        if ndim == 2:
+            for i in range(0, field_norm.shape[0], box_size):
+                for j in range(0, field_norm.shape[1], box_size):
+                    box_field = field_norm[i:i+box_size, j:j+box_size]
+                    box_mask = mask[i:i+box_size, j:j+box_size]
+
+                    # Calculate observed fraction
+                    observed_fraction = np.mean(box_mask)
+                    if observed_fraction < min_observed_fraction:
+                        continue
+
+                    # Sum observed mass and correct for coverage
+                    observed_mass = np.sum(box_field[box_mask])
+                    if observed_mass > 0:
+                        # Correct mass for partial coverage
+                        corrected_mass = observed_mass / observed_fraction
+                        masses.append(corrected_mass)
+        else:  # ndim == 3
+            for i in range(0, field_norm.shape[0], box_size):
+                for j in range(0, field_norm.shape[1], box_size):
+                    for k in range(0, field_norm.shape[2], box_size):
+                        box_field = field_norm[i:i+box_size, j:j+box_size, k:k+box_size]
+                        box_mask = mask[i:i+box_size, j:j+box_size, k:k+box_size]
+
+                        # Calculate observed fraction
+                        observed_fraction = np.mean(box_mask)
+                        if observed_fraction < min_observed_fraction:
+                            continue
+
+                        # Sum observed mass and correct for coverage
+                        observed_mass = np.sum(box_field[box_mask])
+                        if observed_mass > 0:
+                            corrected_mass = observed_mass / observed_fraction
+                            masses.append(corrected_mass)
+
+        masses = np.array(masses)
+
+        # Calculate partition function: Z_q(ε) = Sum_i(m_i^q)
+        if len(masses) == 0:
+            partition_sums.append(0)
+        elif q == 1:
+            # Special case: q=1 uses information/entropy formulation
+            masses_nonzero = masses[masses > 0]
+            if len(masses_nonzero) > 0:
+                # Renormalize masses for entropy calculation
+                masses_renorm = masses_nonzero / np.sum(masses_nonzero)
+                info_sum = np.sum(masses_renorm * np.log(masses_renorm))
+                partition_sums.append(info_sum)
+            else:
+                partition_sums.append(0)
+        else:
+            # General case: Z_q = Sum_i(m_i^q)
+            # Renormalize masses before computing partition function
+            if np.sum(masses) > 0:
+                masses_renorm = masses / np.sum(masses)
+                partition_sum = np.sum(masses_renorm ** q)
+                partition_sums.append(partition_sum)
+            else:
+                partition_sums.append(0)
+
+    return partition_sums
 
 
 def fractal_dimension_mass(field, min_box_size=2, max_box_size=None,
                            num_scales=10, q=2, return_diagnostics=False):
     """
     Measure the mass-based fractal dimension of a 2D or 3D field.
+
+    .. deprecated::
+        This function is deprecated. Use `fractal_dimension(field, method='mass')`
+        instead, which provides additional features including spatial weighting
+        and masking support.
 
     This function estimates the fractal dimension by accounting for the field
     intensity (mass) rather than just spatial occupancy. The field is normalized
@@ -363,170 +654,27 @@ def fractal_dimension_mass(field, min_box_size=2, max_box_size=None,
     >>> # Compare different q values
     >>> d0 = fractal_dimension_mass(field, q=0)  # Capacity dimension
     >>> d2 = fractal_dimension_mass(field, q=2)  # Correlation dimension
+
+    See Also
+    --------
+    fractal_dimension : Unified function with weighting and masking support.
     """
-    # Input validation
-    field = np.asarray(field)
-    dim = len(field.shape)
-
-    if dim not in [2, 3]:
-        raise ValueError(f'Field must be 2D or 3D. Got shape: {field.shape}')
-
-    if np.any(field < 0):
-        raise ValueError('Field must contain non-negative values for mass-based analysis')
-
-    if min_box_size < 2:
-        raise ValueError(f'min_box_size must be >= 2. Got: {min_box_size}')
-
-    # Normalize the field to sum to 1 (treat as mass distribution)
-    total_mass = np.sum(field)
-    if total_mass == 0:
-        raise ValueError('Field has zero total mass')
-
-    field_norm = field / total_mass
-
-    # Determine max box size
-    min_field_dim = min(field.shape)
-    if max_box_size is None:
-        max_box_size = min_field_dim // 2
-
-    if max_box_size > min_field_dim:
-        raise ValueError(
-            f'max_box_size ({max_box_size}) cannot exceed minimum field '
-            f'dimension ({min_field_dim})'
-        )
-
-    if min_box_size >= max_box_size:
-        raise ValueError(
-            f'min_box_size ({min_box_size}) must be less than max_box_size '
-            f'({max_box_size})'
-        )
-
-    # Generate logarithmically-spaced box sizes
-    box_sizes = np.logspace(
-        np.log10(min_box_size),
-        np.log10(max_box_size),
-        num=num_scales,
-        dtype=int
+    import warnings
+    warnings.warn(
+        "fractal_dimension_mass is deprecated. Use fractal_dimension(field, method='mass') instead.",
+        DeprecationWarning,
+        stacklevel=2
     )
-    box_sizes = np.unique(box_sizes)  # Remove duplicates from rounding
 
-    partition_sums = []
-
-    # Calculate partition function for each box size
-    for box_size in box_sizes:
-        masses = []
-
-        if dim == 2:
-            # 2D case
-            for i in range(0, field.shape[0], box_size):
-                for j in range(0, field.shape[1], box_size):
-                    # Extract box and sum the mass
-                    box = field_norm[i:i+box_size, j:j+box_size]
-                    mass = np.sum(box)
-                    if mass > 0:  # Only include non-empty boxes
-                        masses.append(mass)
-
-        else:  # dim == 3
-            # 3D case
-            for i in range(0, field.shape[0], box_size):
-                for j in range(0, field.shape[1], box_size):
-                    for k in range(0, field.shape[2], box_size):
-                        # Extract box and sum the mass
-                        box = field_norm[i:i+box_size, j:j+box_size, k:k+box_size]
-                        mass = np.sum(box)
-                        if mass > 0:  # Only include non-empty boxes
-                            masses.append(mass)
-
-        masses = np.array(masses)
-
-        # Calculate partition function: Z_q(ε) = Sum_i(m_i^q)
-        if q == 1:
-            # Special case: q=1 uses information/entropy formulation
-            # For q=1, we use: Sum_i(m_i * log(m_i))
-            masses_nonzero = masses[masses > 0]
-            if len(masses_nonzero) > 0:
-                # Information sum (will be negative, but we track the sum itself)
-                info_sum = np.sum(masses_nonzero * np.log(masses_nonzero))
-                partition_sum = info_sum  # Store as-is for linear fit
-            else:
-                partition_sum = 0
-        else:
-            # General case: Z_q = Sum_i(m_i^q)
-            partition_sum = np.sum(masses ** q)
-
-        partition_sums.append(partition_sum)
-
-    partition_sums = np.array(partition_sums)
-
-    # Handle different cases for q
-    if q == 1:
-        # For q=1, partition sums are negative (information content)
-        # We fit the information sum directly vs log(ε)
-        valid_mask = partition_sums != 0
-        box_sizes_valid = box_sizes[valid_mask]
-        partition_sums_valid = partition_sums[valid_mask]
-
-        if len(box_sizes_valid) < 2:
-            raise ValueError(
-                'Not enough valid data points for dimension estimation. '
-                'Try adjusting box size parameters.'
-            )
-
-        log_scales = np.log(box_sizes_valid)
-        # For q=1, we fit I(ε) = Sum(p_i*log(p_i)) vs log(ε)
-        # D_1 = -dI/d(log ε)
-        log_partition = partition_sums_valid  # Don't take log, use values directly
-    else:
-        # Remove any zero or negative partition sums (would cause log issues)
-        valid_mask = partition_sums > 0
-        box_sizes_valid = box_sizes[valid_mask]
-        partition_sums_valid = partition_sums[valid_mask]
-
-        if len(box_sizes_valid) < 2:
-            raise ValueError(
-                'Not enough valid data points for dimension estimation. '
-                'Try adjusting box size parameters.'
-            )
-
-        # Fit log(Z_q) vs log(ε) to get dimension
-        # Z_q(ε) ~ ε^(τ(q)) where τ(q) = (q-1)*D_q
-        # log(Z_q) = τ(q) * log(ε) + const
-        log_scales = np.log(box_sizes_valid)
-        log_partition = np.log(partition_sums_valid)
-
-    # Linear regression
-    coeffs = np.polyfit(log_scales, log_partition, 1)
-    slope, intercept = coeffs
-
-    # The dimension D_q is related to slope by: slope = (q-1)*D_q
-    if q == 1:
-        # For q=1 (information dimension), D_1 = -slope
-        # since we fit I(ε) vs log(ε) where I = Sum(p_i*log(p_i))
-        dimension = -slope
-    else:
-        dimension = slope / (q - 1)
-
-    # Calculate R² for goodness of fit
-    log_partition_pred = slope * log_scales + intercept
-    ss_res = np.sum((log_partition - log_partition_pred) ** 2)
-    ss_tot = np.sum((log_partition - np.mean(log_partition)) ** 2)
-    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-
-    print(f'Mass-based fractal dimension D_{q} = {dimension:.4f}')
-    print(f'Fit quality (R²): {r_squared:.4f}')
-
-    if return_diagnostics:
-        diagnostics = {
-            'box_sizes': box_sizes_valid,
-            'partition_sums': partition_sums_valid,
-            'slope': slope,
-            'intercept': intercept,
-            'r_squared': r_squared,
-            'q': q
-        }
-        return dimension, diagnostics
-
-    return dimension
+    return fractal_dimension(
+        field,
+        min_box_size=min_box_size,
+        max_box_size=max_box_size,
+        num_scales=num_scales,
+        method='mass',
+        q=q,
+        return_diagnostics=return_diagnostics
+    )
 
 
 def mock(density=None, boxsize=100, Npart=100):
