@@ -1,8 +1,10 @@
 import numpy as np
 from scipy.stats import poisson
+import matplotlib.pyplot as plt
 
 
-def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False):
+def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
+              plot=False, save_path=None, show_plot=True, cmap='viridis', title=None):
     """
     Generate a multiplicative cascade fractal field.
 
@@ -26,6 +28,22 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False):
     add_power : bool, optional
         If True, applies increasing power weights at each level to modify
         the fractal dimension. Default is False.
+    plot : bool, optional
+        If True, generates a visualization of the cascade field. For 1D fields,
+        creates a line plot. For 2D fields, creates a heatmap. For 3D fields,
+        creates a maximum intensity projection. Default is False.
+    save_path : str, optional
+        Path to save the figure. If None, the figure is not saved. The file
+        format is determined by the extension (e.g., '.png', '.pdf').
+        Default is None.
+    show_plot : bool, optional
+        If True, displays the plot interactively using plt.show(). Only relevant
+        if plot=True. Default is True.
+    cmap : str, optional
+        Colormap to use for 2D and 3D visualizations. Default is 'viridis'.
+    title : str, optional
+        Custom title for the plot. If None, a default title is generated.
+        Default is None.
 
     Returns
     -------
@@ -46,6 +64,13 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False):
     >>> field, slope = multifrac(weights, dim=2, size=2, levels=3)
     >>> print(field.shape)
     (16, 16)
+
+    >>> # Generate and plot a 2D fractal field
+    >>> field, slope = multifrac(weights, dim=2, levels=4, plot=True)
+
+    >>> # Generate and save without displaying
+    >>> field, slope = multifrac(weights, dim=2, levels=4, plot=True,
+    ...                          save_path='fractal.png', show_plot=False)
     """
     # Input validation
     if dim not in [1, 2, 3]:
@@ -119,11 +144,54 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False):
 
     print(f'Power law slope (theory) = {theoretical_slope:.6f}')
 
+    # Generate plot if requested
+    if plot:
+        fig = plt.figure(figsize=(10, 8))
+
+        if title is None:
+            title = f'{dim}D Multiplicative Cascade (levels={levels}, slope={theoretical_slope:.3f})'
+
+        if dim == 1:
+            # 1D: Line plot
+            plt.plot(cascade_field, linewidth=0.5)
+            plt.xlabel('Position')
+            plt.ylabel('Field Value')
+            plt.title(title)
+            plt.grid(True, alpha=0.3)
+
+        elif dim == 2:
+            # 2D: Heatmap
+            im = plt.imshow(cascade_field, cmap=cmap, interpolation='nearest')
+            plt.colorbar(im, label='Field Value')
+            plt.xlabel('X')
+            plt.ylabel('Y')
+            plt.title(title)
+
+        elif dim == 3:
+            # 3D: Maximum intensity projection along z-axis
+            max_projection = np.max(cascade_field, axis=2)
+            im = plt.imshow(max_projection, cmap=cmap, interpolation='nearest')
+            plt.colorbar(im, label='Max Field Value (Z-projection)')
+            plt.xlabel('X')
+            plt.ylabel('Y')
+            plt.title(title + ' (Max Z-projection)')
+
+        plt.tight_layout()
+
+        if save_path is not None:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f'Figure saved to {save_path}')
+
+        if show_plot:
+            plt.show()
+        else:
+            plt.close()
+
     return cascade_field, theoretical_slope
 
 
 def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
-                      num_scales=10, method='binary', q=2, weights=None,
+                      num_scales=10, method='mass', q=2, weights=None,
                       mask=None, min_observed_fraction=0.5,
                       return_diagnostics=False):
     """
@@ -153,7 +221,7 @@ def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
         - 'binary': Threshold-based box counting. Counts boxes where mean > threshold.
         - 'mass': Mass-based method using partition functions. Accounts for field
           intensity rather than just spatial occupancy.
-        Default is 'binary'.
+        Default is 'mass'.
     q : float, optional
         Order of the generalized dimension (mass method only). Common values:
         - q=0: Capacity dimension (counts non-empty boxes)
