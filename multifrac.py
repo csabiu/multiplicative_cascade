@@ -112,10 +112,10 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False):
     if add_power:
         # Empirical formula for add_power mode
         # The 0.5 offset is based on experimental observations
-        theoretical_slope = np.log2(np.sum(normalized_prob ** levels)) / (levels + 0.5)
+        theoretical_slope = -np.log2(np.sum(normalized_prob ** levels)) / (levels + 0.5)
     else:
         # Standard box-counting dimension formula
-        theoretical_slope = np.log2(np.sum(normalized_prob ** 2))
+        theoretical_slope = -np.log2(np.sum(normalized_prob ** 2))
 
     print(f'Power law slope (theory) = {theoretical_slope:.6f}')
 
