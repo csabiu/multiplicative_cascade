@@ -27,7 +27,7 @@ pip install numpy scipy
 Generate a multiplicative cascade fractal field.
 
 **Parameters:**
-- `probabilities`: Probability weights for the cascade (should sum to ~1.0)
+- `probabilities`: Probability weights for the cascade
 - `dim`: Dimensionality (1, 2, or 3)
 - `size`: Subdivision factor at each level (default: 2)
 - `levels`: Number of cascade levels (default: 4)
