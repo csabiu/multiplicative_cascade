@@ -225,7 +225,7 @@ def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
     q : float, optional
         Order of the generalized dimension (mass method only). Common values:
         - q=0: Capacity dimension (counts non-empty boxes)
-        - q=1: Information dimension (entropy-based)
+        - q=1: Information dimension (entropy-based, automatically perturbed to 1.00001 for numerical stability)
         - q=2: Correlation dimension (default, recommended)
         Higher q values emphasize high-density regions. Default is 2.
     weights : ndarray, optional
@@ -295,6 +295,11 @@ def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
 
     if method not in ['binary', 'mass']:
         raise ValueError(f"method must be 'binary' or 'mass'. Got: {method}")
+
+    # Handle numerical instability for q=1 by adding small perturbation
+    if method == 'mass' and abs(q - 1.0) < 1e-10:
+        q = 1.00001
+        print('Note: q=1 perturbed to q=1.00001 for numerical stability')
 
     if not 0 <= min_observed_fraction <= 1:
         raise ValueError(
@@ -685,7 +690,7 @@ def fractal_dimension_mass(field, min_box_size=2, max_box_size=None,
     q : float, optional
         Order of the generalized dimension. Common values:
         - q=0: Capacity dimension (counts non-empty boxes)
-        - q=1: Information dimension (entropy-based, experimental)
+        - q=1: Information dimension (entropy-based, automatically perturbed to 1.00001 for numerical stability)
         - q=2: Correlation dimension (default, recommended)
         - q=3: Higher-order dimension
         Higher q values emphasize high-density regions. Default is 2.
