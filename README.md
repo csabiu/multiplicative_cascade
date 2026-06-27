@@ -27,15 +27,18 @@ pip install numpy scipy
 Generate a multiplicative cascade fractal field.
 
 **Parameters:**
-- `probabilities`: Probability weights for the cascade
+- `probabilities`: Probability weights for the cascade (auto-normalized to sum to 1, with a warning, so mass is conserved)
 - `dim`: Dimensionality (1, 2, or 3)
-- `size`: Subdivision factor at each level (default: 2)
+- `size`: Subdivision factor / cascade base `b` at each level (default: 2)
 - `levels`: Number of cascade levels (default: 4)
-- `add_power`: Apply increasing power weights at each level (default: False)
+- `add_power`: Apply increasing power weights at each level — breaks mass conservation, slope is only a rough estimate (default: False)
+- `seed` / `rng`: Reproducible random permutations without touching global state. With neither, the legacy global `np.random` state is used. (default: None)
+- `verbose`: Print the theoretical `D₂` (default: False)
+- `plot`: Convenience plotting, delegated to `plot_field` (default: False)
 
 **Returns:**
 - `cascade_field`: The generated multifractal field
-- `theoretical_slope`: Theoretical fractal dimension
+- `theoretical_slope`: The theoretical correlation dimension `D₂ = -log_b(Σᵢ pᵢ²)`
 
 **Example:**
 ```python
@@ -110,22 +113,64 @@ Generate mock particle distributions from a density field using Poisson sampling
 ```python
 from multifrac import mock
 
-# Generate particles from density field
-particles, randoms = mock(field, boxsize=100, Npart=1000)
+# Generate particles from density field (seed= for reproducibility)
+particles, randoms = mock(field, boxsize=100, Npart=1000, seed=0)
 print(f"Generated {particles.shape[0]} particles")
 ```
+
+### `cascade_spectrum(weights, base=2, q=None)`
+
+Exact **closed-form** multifractal spectrum of a conservative cascade — its
+distinguishing feature. Returns a dict with arrays `tau`, `D` (= D_q), `alpha`,
+`f` over `q`, plus scalars `D0` (capacity), `D1` (information), `D2`
+(correlation) and `delta_alpha` = log_b(p_max/p_min), the spectrum width (0 for a
+monofractal). Zero weights are handled, so e.g. the Sierpinski multiset
+`[1/3, 1/3, 1/3, 0]` works.
+
+```python
+from multifrac import cascade_spectrum
+
+s = cascade_spectrum([0.4, 0.3, 0.2, 0.1], base=2)
+print(s['D2'], s['delta_alpha'])        # 1.737, 2.0
+```
+
+### `generalized_dimensions(field, q=None, base=2)`
+
+**Measured** counterpart of `cascade_spectrum`: estimates the whole `D_q`,
+`tau(q)`, `alpha(q)`, `f(q)` spectrum from a single field in one call using the
+Chhabra–Jensen direct method (no unstable numerical Legendre transform). Works
+for 2D and 3D fields.
+
+```python
+from multifrac import multifrac, cascade_spectrum, generalized_dimensions
+
+field, _ = multifrac([0.4, 0.3, 0.2, 0.1], dim=2, levels=9, seed=1)
+measured = generalized_dimensions(field, base=2)   # measured D_q ...
+theory   = cascade_spectrum([0.4, 0.3, 0.2, 0.1])  # ... vs exact closed form
+```
+
+### `plot_field(field, cmap='viridis', ...)`
+
+Visualize a 1D/2D/3D field. matplotlib is imported lazily here, so importing
+`multifrac` and generating fields never requires matplotlib unless you plot.
 
 ## Theory
 
 ### Multiplicative Cascade
 
-A multiplicative cascade creates a multifractal by recursively subdividing space and multiplying by random probability weights. The theoretical correlation dimension D₂ is given by:
+A multiplicative cascade creates a multifractal by recursively subdividing space and multiplying by random probability weights. For a conservative cascade of base `b` (= `size`), the **entire** multifractal spectrum is known in closed form:
 
 ```
-D₂ = -log₂(Σᵢ pᵢ²)
+τ(q) = -log_b(Σᵢ pᵢ^q),    D_q = τ(q)/(q-1),    f(α) = qα - τ(q)
 ```
 
-where pᵢ are the normalized probability weights.
+so the correlation dimension is
+
+```
+D₂ = -log_b(Σᵢ pᵢ²),    b = size
+```
+
+where pᵢ are the normalized weights. **Note:** the logarithm is in base `b` (= `size`); it is *not* a hardcoded base 2 — the two coincide only for `size = 2`. Use `cascade_spectrum(weights, base)` for the full spectrum.
 
 ### Box-Counting Methods
 

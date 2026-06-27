@@ -24,10 +24,15 @@ def test_2d_field():
     dimension, diag = fractal_dimension(field, return_diagnostics=True)
 
     print(f"\nDiagnostic information:")
+    print(f"  Method: {diag['method']}")
     print(f"  Number of scales tested: {len(diag['box_sizes'])}")
     print(f"  Box sizes: {diag['box_sizes']}")
-    print(f"  Box counts: {diag['box_counts']}")
-    print(f"  Threshold used: {diag['threshold_used']:.6f}")
+    if diag['method'] == 'binary':
+        print(f"  Box counts: {diag['box_counts']}")
+        print(f"  Threshold used: {diag['threshold_used']:.6f}")
+    else:
+        print(f"  Partition sums (q={diag['q']}): {diag['partition_sums']}")
+    print(f"  Fit quality R^2: {diag['r_squared']:.4f}")
 
     return dimension
 
@@ -51,10 +56,15 @@ def test_3d_field():
     dimension, diag = fractal_dimension(field, return_diagnostics=True)
 
     print(f"\nDiagnostic information:")
+    print(f"  Method: {diag['method']}")
     print(f"  Number of scales tested: {len(diag['box_sizes'])}")
     print(f"  Box sizes: {diag['box_sizes']}")
-    print(f"  Box counts: {diag['box_counts']}")
-    print(f"  Threshold used: {diag['threshold_used']:.6f}")
+    if diag['method'] == 'binary':
+        print(f"  Box counts: {diag['box_counts']}")
+        print(f"  Threshold used: {diag['threshold_used']:.6f}")
+    else:
+        print(f"  Partition sums (q={diag['q']}): {diag['partition_sums']}")
+    print(f"  Fit quality R^2: {diag['r_squared']:.4f}")
 
     return dimension
 
