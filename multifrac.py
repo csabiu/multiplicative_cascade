@@ -1,10 +1,17 @@
+import warnings
+
 import numpy as np
 from scipy.stats import poisson
-import matplotlib.pyplot as plt
+
+__all__ = [
+    'multifrac', 'plot_field', 'cascade_spectrum', 'generalized_dimensions',
+    'fractal_dimension', 'fractal_dimension_mass', 'mock',
+]
 
 
 def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
-              plot=False, save_path=None, show_plot=True, cmap='viridis', title=None):
+              seed=None, rng=None, plot=False, save_path=None, show_plot=True,
+              cmap='viridis', title=None, verbose=False):
     """
     Generate a multiplicative cascade fractal field.
 
@@ -27,7 +34,18 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
         size**(levels+1) cells per dimension. Default is 4.
     add_power : bool, optional
         If True, applies increasing power weights at each level to modify
-        the fractal dimension. Default is False.
+        the fractal dimension. Default is False. NOTE: this breaks exact mass
+        conservation (the cascade is no longer microcanonical) and the returned
+        slope is only a rough empirical estimate -- prefer ``add_power=False``.
+    seed : int, optional
+        Seed for a fresh ``numpy.random.default_rng`` used to draw the random
+        permutations, giving reproducible fields without touching global state.
+        Ignored if ``rng`` is given. If both ``seed`` and ``rng`` are None the
+        legacy global ``numpy.random`` state is used (so ``np.random.seed(...)``
+        still reproduces old results). Default is None.
+    rng : numpy.random.Generator, optional
+        An explicit random generator to draw from (wins over ``seed``).
+        Default is None.
     plot : bool, optional
         If True, generates a visualization of the cascade field. For 1D fields,
         creates a line plot. For 2D fields, creates a heatmap. For 3D fields,
@@ -44,6 +62,9 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
     title : str, optional
         Custom title for the plot. If None, a default title is generated.
         Default is None.
+    verbose : bool, optional
+        If True, print the theoretical correlation dimension. Default is False
+        (quiet, so generating many realizations in a loop produces no output).
 
     Returns
     -------
@@ -51,7 +72,9 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
         The generated multiplicative cascade field with shape determined by
         (size**(levels+1),) * dim
     theoretical_slope : float
-        The theoretical power law slope (fractal dimension)
+        The theoretical correlation dimension D2 = -log_b(sum_i p_i^2) of the
+        conservative cascade, where the base b = ``size``. (For ``add_power=True``
+        this is only a rough empirical estimate; see note below.)
 
     Raises
     ------
@@ -82,7 +105,7 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
     if levels <= 0:
         raise ValueError(f'Levels must be positive. Got: {levels}')
 
-    probabilities = np.asarray(probabilities)
+    probabilities = np.asarray(probabilities, dtype=float)
     expected_length = size ** dim
     if len(probabilities) != expected_length:
         raise ValueError(
@@ -90,12 +113,29 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
             f'size^dim ({expected_length})'
         )
 
+    # A conservative (microcanonical) cascade requires the weights to sum to 1
+    # so that mass is conserved exactly at every level. Normalize (with a
+    # warning) if the caller passed an un-normalized multiset.
+    total = probabilities.sum()
+    if not np.isclose(total, 1.0):
+        warnings.warn(
+            f'probabilities sum to {total:.6g}, not 1; normalizing so that mass '
+            f'is conserved (pass weights summing to 1 to silence this).',
+            stacklevel=2,
+        )
+        probabilities = probabilities / total
+
+    # Resolve the random generator: an explicit Generator (``rng``) wins, else a
+    # fresh seeded Generator (``seed``), else the legacy global ``np.random``
+    # state (preserving reproducibility via ``np.random.seed()``).
+    rng = _resolve_rng(rng, seed)
+
     # Initialize grid shape
     grid_shape = np.tile(size, dim)
     power_increment = 1.0 if add_power else 0.0
 
     # Initialize the cascade field with randomly permuted probabilities
-    cascade_field = np.random.permutation(probabilities).reshape(grid_shape)
+    cascade_field = rng.permutation(probabilities).reshape(grid_shape)
 
     # Perform the multiplicative cascade
     for level in range(levels):
@@ -107,14 +147,14 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
             for i in range(0, grid_size, size):
                 power = power_increment * level + 1
                 new_field[i:i+size] = (
-                    np.random.permutation(probabilities).reshape(grid_shape) ** power
+                    rng.permutation(probabilities).reshape(grid_shape) ** power
                 )
         elif dim == 2:
             for i in range(0, grid_size, size):
                 for j in range(0, grid_size, size):
                     power = power_increment * level + 1
                     new_field[i:i+size, j:j+size] = (
-                        np.random.permutation(probabilities).reshape(grid_shape) ** power
+                        rng.permutation(probabilities).reshape(grid_shape) ** power
                     )
         elif dim == 3:
             for i in range(0, grid_size, size):
@@ -122,7 +162,7 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
                     for k in range(0, grid_size, size):
                         power = power_increment * level + 1
                         new_field[i:i+size, j:j+size, k:k+size] = (
-                            np.random.permutation(probabilities).reshape(grid_shape) ** power
+                            rng.permutation(probabilities).reshape(grid_shape) ** power
                         )
 
         # Expand the existing field to match the new grid size
@@ -132,60 +172,37 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
         # Multiply the fields
         cascade_field = cascade_field * new_field
 
-    # Calculate theoretical power law slope (fractal dimension)
+    # Calculate the theoretical correlation dimension D2 of the cascade.
+    # The subdivision factor `size` is the cascade base b, so the log MUST be
+    # taken in base b (= size), not a hardcoded base 2. They coincide only for
+    # size == 2; for e.g. size == 3 the old log2 form over-estimated D2 by
+    # ln(3)/ln(2) ~ 1.585.
     normalized_prob = probabilities / np.sum(probabilities)
+    log_base = np.log(size)
     if add_power:
-        # Empirical formula for add_power mode
-        # The 0.5 offset is based on experimental observations
-        theoretical_slope = -np.log2(np.sum(normalized_prob ** levels)) / (levels + 0.5)
+        # WARNING: add_power=True breaks mass conservation (the cascade is no
+        # longer microcanonical), so there is no clean closed form. This slope
+        # is a rough empirical fit (the +0.5 offset has no derivation) and
+        # should not be quoted as the true generalized dimension.
+        theoretical_slope = -np.log(np.sum(normalized_prob ** levels)) / (log_base * (levels + 0.5))
     else:
-        # Standard box-counting dimension formula
-        theoretical_slope = -np.log2(np.sum(normalized_prob ** 2))
+        # Conservative (microcanonical) cascade, base b = size:
+        #   D2 = -log_b( sum_i p_i^2 )
+        # This is the exact q=2 generalized / correlation dimension.
+        theoretical_slope = -np.log(np.sum(normalized_prob ** 2)) / log_base
 
-    print(f'Power law slope (theory) = {theoretical_slope:.6f}')
+    if verbose:
+        print(f'Correlation dimension D2 (theory) = {theoretical_slope:.6f}')
 
-    # Generate plot if requested
+    # Generate plot if requested. Delegated to plot_field (which imports
+    # matplotlib lazily) so that importing this module and generating fields
+    # never requires matplotlib unless you actually plot.
     if plot:
-        fig = plt.figure(figsize=(10, 8))
-
         if title is None:
-            title = f'{dim}D Multiplicative Cascade (levels={levels}, slope={theoretical_slope:.3f})'
-
-        if dim == 1:
-            # 1D: Line plot
-            plt.plot(cascade_field, linewidth=0.5)
-            plt.xlabel('Position')
-            plt.ylabel('Field Value')
-            plt.title(title)
-            plt.grid(True, alpha=0.3)
-
-        elif dim == 2:
-            # 2D: Heatmap
-            im = plt.imshow(cascade_field, cmap=cmap, interpolation='nearest')
-            plt.colorbar(im, label='Field Value')
-            plt.xlabel('X')
-            plt.ylabel('Y')
-            plt.title(title)
-
-        elif dim == 3:
-            # 3D: Maximum intensity projection along z-axis
-            max_projection = np.max(cascade_field, axis=2)
-            im = plt.imshow(max_projection, cmap=cmap, interpolation='nearest')
-            plt.colorbar(im, label='Max Field Value (Z-projection)')
-            plt.xlabel('X')
-            plt.ylabel('Y')
-            plt.title(title + ' (Max Z-projection)')
-
-        plt.tight_layout()
-
-        if save_path is not None:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f'Figure saved to {save_path}')
-
-        if show_plot:
-            plt.show()
-        else:
-            plt.close()
+            title = (f'{dim}D multiplicative cascade '
+                     f'(levels={levels}, $D_2$={theoretical_slope:.3f})')
+        plot_field(cascade_field, cmap=cmap, title=title,
+                   save_path=save_path, show=show_plot)
 
     return cascade_field, theoretical_slope
 
@@ -193,7 +210,7 @@ def multifrac(probabilities, dim=2, size=2, levels=4, add_power=False,
 def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
                       num_scales=10, method='mass', q=2, weights=None,
                       mask=None, min_observed_fraction=0.5,
-                      return_diagnostics=False):
+                      return_diagnostics=False, verbose=False):
     """
     Measure the fractal dimension of a 2D or 3D field using box-counting methods.
 
@@ -243,6 +260,8 @@ def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
         between 0 and 1. Default is 0.5.
     return_diagnostics : bool, optional
         If True, returns additional diagnostic information. Default is False.
+    verbose : bool, optional
+        If True, print the estimated dimension and fit quality. Default is False.
 
     Returns
     -------
@@ -461,13 +480,14 @@ def fractal_dimension(field, threshold=None, min_box_size=2, max_box_size=None,
     ss_tot = np.sum((log_values - np.mean(log_values)) ** 2)
     r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
 
-    if method == 'binary':
-        print(f'Fractal dimension (box-counting): {dimension:.4f}')
-    else:
-        print(f'Mass-based fractal dimension D_{q} = {dimension:.4f}')
-    print(f'Fit quality (R²): {r_squared:.4f}')
-    if mask_applied:
-        print(f'Mask correction applied (min_observed_fraction={min_observed_fraction})')
+    if verbose:
+        if method == 'binary':
+            print(f'Fractal dimension (box-counting): {dimension:.4f}')
+        else:
+            print(f'Mass-based fractal dimension D_{q} = {dimension:.4f}')
+        print(f'Fit quality (R²): {r_squared:.4f}')
+        if mask_applied:
+            print(f'Mask correction applied (min_observed_fraction={min_observed_fraction})')
 
     if return_diagnostics:
         diagnostics = {
@@ -745,7 +765,7 @@ def fractal_dimension_mass(field, min_box_size=2, max_box_size=None,
     )
 
 
-def mock(density=None, boxsize=100, Npart=100):
+def mock(density=None, boxsize=100, Npart=100, seed=None, rng=None):
     """
     Generate mock particle distributions from a density field.
 
@@ -760,6 +780,11 @@ def mock(density=None, boxsize=100, Npart=100):
         Physical size of the simulation box. Default is 100.
     Npart : int, optional
         Target number of particles to generate. Default is 100.
+    seed : int, optional
+        Seed for a fresh ``numpy.random.default_rng`` (reproducible sampling
+        without touching global state). Ignored if ``rng`` is given. Default None.
+    rng : numpy.random.Generator, optional
+        Explicit random generator to draw from (wins over ``seed``). Default None.
 
     Returns
     -------
@@ -793,8 +818,16 @@ def mock(density=None, boxsize=100, Npart=100):
     Nmesh = density.shape[0]
     cell_size = boxsize / Nmesh
 
+    # Resolve the random generator (see multifrac). scipy's poisson.rvs needs a
+    # Generator/RandomState/int/None for random_state, so the legacy global path
+    # passes None (uses global state) while uniform sampling uses ``gen`` (the
+    # np.random module also exposes ``.uniform``).
+    gen = _resolve_rng(rng, seed)
+    rstate = None if gen is np.random else gen
+
     # Poisson sample the density field
-    density_counts = poisson.rvs(Npart * density / np.sum(density))
+    density_counts = poisson.rvs(Npart * density / np.sum(density),
+                                 random_state=rstate)
 
     # Random sample multiplier (for generating comparison uniform random sample)
     RANDOM_SAMPLE_MULTIPLIER = 10
@@ -808,17 +841,17 @@ def mock(density=None, boxsize=100, Npart=100):
                 for k in range(Nmesh):
                     n_particles = density_counts[i, j, k]
                     if n_particles > 0:
-                        xpoints = np.random.uniform(
+                        xpoints = gen.uniform(
                             low=i*cell_size,
                             high=(i+1)*cell_size,
                             size=n_particles
                         )
-                        ypoints = np.random.uniform(
+                        ypoints = gen.uniform(
                             low=j*cell_size,
                             high=(j+1)*cell_size,
                             size=n_particles
                         )
-                        zpoints = np.random.uniform(
+                        zpoints = gen.uniform(
                             low=k*cell_size,
                             high=(k+1)*cell_size,
                             size=n_particles
@@ -826,7 +859,7 @@ def mock(density=None, boxsize=100, Npart=100):
                         cell_points = np.column_stack((xpoints, ypoints, zpoints))
                         points_list.append(cell_points)
 
-        randoms = np.random.uniform(
+        randoms = gen.uniform(
             low=0.0,
             high=boxsize,
             size=(RANDOM_SAMPLE_MULTIPLIER * Npart, 3)
@@ -837,12 +870,12 @@ def mock(density=None, boxsize=100, Npart=100):
             for j in range(Nmesh):
                 n_particles = density_counts[i, j]
                 if n_particles > 0:
-                    xpoints = np.random.uniform(
+                    xpoints = gen.uniform(
                         low=i*cell_size,
                         high=(i+1)*cell_size,
                         size=n_particles
                     )
-                    ypoints = np.random.uniform(
+                    ypoints = gen.uniform(
                         low=j*cell_size,
                         high=(j+1)*cell_size,
                         size=n_particles
@@ -850,7 +883,7 @@ def mock(density=None, boxsize=100, Npart=100):
                     cell_points = np.column_stack((xpoints, ypoints))
                     points_list.append(cell_points)
 
-        randoms = np.random.uniform(
+        randoms = gen.uniform(
             low=0.0,
             high=boxsize,
             size=(RANDOM_SAMPLE_MULTIPLIER * Npart, 2)
@@ -866,3 +899,258 @@ def mock(density=None, boxsize=100, Npart=100):
     print(f'Number of point samples: {points.shape[0]}')
 
     return points, randoms
+
+
+# --------------------------------------------------------------------------- #
+#  Random-generator helper
+# --------------------------------------------------------------------------- #
+def _resolve_rng(rng=None, seed=None):
+    """Return a random generator: explicit ``rng`` > seeded Generator > global.
+
+    Passing neither falls back to the legacy module-level ``np.random`` state, so
+    code that seeds with ``np.random.seed(...)`` keeps reproducing exactly the
+    same cascades as before.
+    """
+    if rng is not None:
+        return rng
+    if seed is not None:
+        return np.random.default_rng(seed)
+    return np.random
+
+
+# --------------------------------------------------------------------------- #
+#  Plotting (kept separate so the generator itself is matplotlib-free)
+# --------------------------------------------------------------------------- #
+def plot_field(field, cmap='viridis', title=None, save_path=None, show=True,
+               ax=None):
+    """Visualize a 1D / 2D / 3D cascade field.
+
+    matplotlib is imported lazily here, so importing this module and generating
+    fields never requires matplotlib unless you actually plot.
+
+    Parameters
+    ----------
+    field : ndarray
+        A 1D, 2D or 3D cascade field (e.g. the first output of :func:`multifrac`).
+    cmap : str, optional
+        Colormap for 2D/3D images. Default 'viridis'.
+    title : str, optional
+        Plot title. Default None.
+    save_path : str, optional
+        If given, save the figure to this path (format from the extension).
+    show : bool, optional
+        Call ``plt.show()`` when True (default), else close the figure.
+    ax : matplotlib axis, optional
+        Draw onto an existing axis instead of creating a new figure.
+
+    Returns
+    -------
+    ax : matplotlib axis
+        The axis the field was drawn on.
+    """
+    import matplotlib.pyplot as plt
+
+    field = np.asarray(field)
+    dim = field.ndim
+    if dim not in (1, 2, 3):
+        raise ValueError(f'field must be 1D, 2D or 3D. Got shape {field.shape}')
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 8))
+
+    if dim == 1:
+        ax.plot(field, linewidth=0.5)
+        ax.set_xlabel('position')
+        ax.set_ylabel('field value')
+        ax.grid(True, alpha=0.3)
+    else:
+        img = field if dim == 2 else np.max(field, axis=2)
+        label = 'field value' if dim == 2 else 'max value (z-projection)'
+        im = ax.imshow(img, cmap=cmap, interpolation='nearest')
+        ax.figure.colorbar(im, ax=ax, label=label)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+
+    if title is not None:
+        ax.set_title(title)
+    ax.figure.tight_layout()
+
+    if save_path is not None:
+        ax.figure.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f'Figure saved to {save_path}')
+
+    if show:
+        plt.show()
+    return ax
+
+
+# --------------------------------------------------------------------------- #
+#  Exact closed-form multifractal spectrum of a conservative cascade
+# --------------------------------------------------------------------------- #
+def cascade_spectrum(weights, base=2, q=None):
+    r"""Exact multifractal spectrum of a conservative (microcanonical) cascade.
+
+    For a cascade of base ``b`` with weight multiset :math:`\{p_i\}` (summing to
+    one) the multinomial measure has the closed-form spectrum
+
+    .. math::
+        \tau(q) = -\log_b\!\sum_i p_i^{\,q}, \qquad
+        D_q = \frac{\tau(q)}{q-1}, \qquad
+        \alpha(q) = \frac{d\tau}{dq}, \qquad
+        f(\alpha) = q\,\alpha - \tau(q).
+
+    Zero weights are excluded (they affect only the support, not the
+    singularities), so monofractals such as the Sierpinski weights
+    ``[1/3, 1/3, 1/3, 0]`` are handled correctly.
+
+    Parameters
+    ----------
+    weights : array-like
+        Cascade weight multiset; normalized internally.
+    base : int, optional
+        Cascade base ``b`` (the subdivision factor ``size``). Default 2.
+    q : array-like, optional
+        Moment orders. Default ``np.linspace(-6, 8, 281)``.
+
+    Returns
+    -------
+    spectrum : dict
+        Arrays over q: ``q``, ``tau``, ``D`` (= D_q), ``alpha``, ``f``.
+        Scalars: ``D0`` (capacity), ``D1`` (information), ``D2`` (correlation)
+        and ``delta_alpha`` = log_b(p_max / p_min) -- the spectrum width, a clean
+        non-Gaussianity dial (0 for a monofractal).
+
+    Examples
+    --------
+    >>> s = cascade_spectrum([0.4, 0.3, 0.2, 0.1], base=2)
+    >>> round(s['D2'], 3)
+    1.737
+    """
+    if q is None:
+        q = np.linspace(-6, 8, 281)
+    q = np.asarray(q, float)
+    p = np.asarray(weights, float)
+    p = p / p.sum()
+    p = p[p > 0]                       # singularities come from non-zero weights
+    lp = np.log(p)
+    lb = np.log(base)
+
+    Z = np.sum(p[None, :] ** q[:, None], axis=1)
+    S = np.sum(p[None, :] ** q[:, None] * lp[None, :], axis=1)
+    tau = -np.log(Z) / lb
+    alpha = -(S / Z) / lb
+    f = q * alpha - tau
+    with np.errstate(divide='ignore', invalid='ignore'):
+        D = np.where(np.abs(q - 1) < 1e-9, alpha, tau / (q - 1))
+
+    D0 = np.log(p.size) / lb
+    D1 = -np.sum(p * lp) / lb
+    D2 = -np.log(np.sum(p ** 2)) / lb
+    delta_alpha = np.log(p.max() / p.min()) / lb
+    return dict(q=q, tau=tau, D=D, alpha=alpha, f=f,
+                D0=D0, D1=D1, D2=D2, delta_alpha=delta_alpha)
+
+
+# --------------------------------------------------------------------------- #
+#  Measured multifractal spectrum: the Chhabra-Jensen direct method
+# --------------------------------------------------------------------------- #
+def _coarse_masses(field, box):
+    """Total mass in every non-overlapping ``box``-sided cell (n-dimensional)."""
+    m = [s // box for s in field.shape]
+    trimmed = field[tuple(slice(0, mi * box) for mi in m)]
+    newshape = []
+    for mi in m:
+        newshape.extend((mi, box))
+    reshaped = trimmed.reshape(newshape)
+    axes = tuple(range(1, 2 * field.ndim, 2))     # the within-box axes
+    return reshaped.sum(axis=axes).ravel()
+
+
+def generalized_dimensions(field, q=None, base=2, n_boxes_min=4,
+                           return_diagnostics=False, verbose=False):
+    r"""Measure the full multifractal spectrum of a field (Chhabra-Jensen).
+
+    The Chhabra-Jensen direct method estimates :math:`\alpha(q)` and
+    :math:`f(q)` as slopes of measure-weighted sums versus :math:`\log` box
+    size, avoiding the numerically unstable Legendre transform of a measured
+    :math:`\tau(q)`. Box sizes are ``base**j`` pixels. Returns the whole
+    q-spectrum in a single call -- the measured counterpart of
+    :func:`cascade_spectrum`.
+
+    Parameters
+    ----------
+    field : ndarray
+        Non-negative 2D or 3D field (treated as a mass distribution).
+    q : array-like, optional
+        Moment orders. Default ``np.linspace(-5, 6, 23)``.
+    base : int, optional
+        Box-size progression ``base**j`` (use the cascade base). Default 2.
+    n_boxes_min : int, optional
+        Smallest allowed number of boxes per side. Default 4.
+    return_diagnostics : bool, optional
+        Also return the box sizes (``boxes``) and ``logeps`` used. Default False.
+    verbose : bool, optional
+        Print D0/D1/D2. Default False.
+
+    Returns
+    -------
+    spectrum : dict
+        Arrays over q: ``q``, ``tau``, ``D``, ``alpha``, ``f``.
+    """
+    field = np.asarray(field, float)
+    if field.ndim not in (2, 3):
+        raise ValueError(f'field must be 2D or 3D. Got shape {field.shape}')
+    if np.any(field < 0):
+        raise ValueError('field must be non-negative')
+    total = field.sum()
+    if total <= 0:
+        raise ValueError('field has zero total mass')
+    field = field / total
+
+    if q is None:
+        q = np.linspace(-5.0, 6.0, 23)
+    q = np.asarray(q, float)
+
+    N = min(field.shape)
+    jmax = int(np.floor(np.log(N) / np.log(base)))
+    boxes = [base ** j for j in range(1, jmax + 1) if N // (base ** j) >= n_boxes_min]
+    if len(boxes) < 2:
+        raise ValueError(
+            f'not enough box scales for base {base} with n_boxes_min={n_boxes_min}; '
+            f'field is too small.'
+        )
+    logeps = np.log(np.array(boxes, float) / N)        # ln(box / system) < 0
+
+    lnZ = np.zeros((len(boxes), len(q)))
+    num_a = np.zeros_like(lnZ)
+    num_f = np.zeros_like(lnZ)
+    for bi, box in enumerate(boxes):
+        p = _coarse_masses(field, box)
+        p = p[p > 0]
+        lp = np.log(p)
+        pq = p[None, :] ** q[:, None]                  # (nq, nboxes)
+        Zq = pq.sum(axis=1)
+        mu = pq / Zq[:, None]                          # CJ normalised measure
+        lnZ[bi] = np.log(Zq)
+        num_a[bi] = np.sum(mu * lp[None, :], axis=1)
+        num_f[bi] = np.sum(mu * np.log(mu), axis=1)
+
+    def slope(Y):
+        return np.polyfit(logeps, Y, 1)[0]
+
+    tau = np.array([slope(lnZ[:, k]) for k in range(len(q))])
+    alpha = np.array([slope(num_a[:, k]) for k in range(len(q))])
+    f = np.array([slope(num_f[:, k]) for k in range(len(q))])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        D = np.where(np.abs(q - 1) < 1e-9, alpha, tau / (q - 1))
+
+    if verbose:
+        def at(qq):
+            return D[np.argmin(np.abs(q - qq))]
+        print(f'D0={at(0):.4f}  D1={at(1):.4f}  D2={at(2):.4f}')
+
+    out = dict(q=q, tau=tau, D=D, alpha=alpha, f=f)
+    if return_diagnostics:
+        out['boxes'] = np.array(boxes)
+        out['logeps'] = logeps
+    return out
