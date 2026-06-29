@@ -2,6 +2,12 @@
 
 A Python package for generating and analyzing multifractal fields using multiplicative cascade processes.
 
+<p align="center">
+  <img src="docs/cascade_fields_spectrum.png" alt="Three multiplicative cascades of increasing singularity width and their exact multifractal spectra" width="880">
+</p>
+
+> **Three conservative cascades of increasing singularity width** — a Sierpinski monofractal, a *narrow* multifractal, and a *wide* one — sharing a single random-permutation skeleton *(top, a–c)*. Their exact multifractal spectrum — the mass exponent τ(q), generalized dimensions D(q) and singularity spectrum f(α) — is recovered directly from the fields to machine precision *(bottom, d–f)*: the monofractal's spectrum collapses to a single point, while the multifractal f(α) parabolas widen with the tunable non-Gaussianity dial Δα. Both the **generation** and the **analysis** use only the few functions documented below — and the whole figure is reproduced end-to-end by the companion notebook [`paper1/paper1_figures.ipynb`](paper1/paper1_figures.ipynb).
+
 ## Overview
 
 This package implements multifractal analysis tools based on multiplicative cascades, as described in [Wikipedia: Multiplicative cascade](https://en.wikipedia.org/wiki/Multiplicative_cascade). It provides functions for:
