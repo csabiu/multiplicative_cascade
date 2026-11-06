@@ -14,7 +14,8 @@ _DEC = 9
 def log_increments(weights):
     w = np.asarray(weights, float)
     w = w / w.sum()
-    return np.log(N * w)
+    with np.errstate(divide='ignore'):
+        return np.log(N * w)
 
 
 def atoms(C, m):
@@ -26,7 +27,7 @@ def atoms(C, m):
             p = fm
             for c in counts:
                 p //= factorial(c)
-            pos.append(sum(c * ci for c, ci in zip(counts, C)))
+            pos.append(sum(c * ci for c, ci in zip(counts, C) if c > 0))   # zero weight: -inf only if dealt
             pr.append(p / N ** m)
             return
         for c in range(left + 1):

@@ -29,7 +29,8 @@ _DEC = 9                  # rounding of log-density keys in the memo
 def log_increments(weights):
     w = np.asarray(weights, float)
     w = w / w.sum()
-    return np.log(N * w)   # c_i = ln(b^d p_i); -inf for a zero weight
+    with np.errstate(divide='ignore'):
+        return np.log(N * w)   # c_i = ln(b^d p_i); -inf for a zero weight (rho = 0 cells)
 
 
 def atoms(C, m):
@@ -39,7 +40,9 @@ def atoms(C, m):
         for b in range(m - a + 1):
             for c in range(m - a - b + 1):
                 d = m - a - b - c
-                pos.append(a * C[0] + b * C[1] + c * C[2] + d * C[3])
+                # skip zero-count terms so that a zero weight (c_i = -inf) only enters
+                # when it is actually dealt (0 * -inf would be nan)
+                pos.append(sum(k * ci for k, ci in zip((a, b, c, d), C) if k > 0))
                 pr.append(fm / (factorial(a) * factorial(b) * factorial(c) * factorial(d)) / N ** m)
     return np.array(pos), np.array(pr)
 
