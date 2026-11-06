@@ -221,6 +221,12 @@ python test_unified_dimension.py
 - Box-counting dimension for multifractal analysis
 - Generalized dimensions and partition functions
 
+## Topology of the cascade (`topology/`)
+
+Exact ensemble-mean digital Euler characteristic (genus) of the cascade's excursion
+sets, in 2D and 3D, as an exact finite recursion over the multinomial atoms (no
+simulation). See `topology/README.md`.
+
 ## License
 
 See LICENSE file for details.

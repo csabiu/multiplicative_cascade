@@ -156,6 +156,8 @@ def bulk_densities(on):
 def genus_measured(weights, J, thresholds, nreal=120, seed0=1, generator=None):
     """Bulk p1, pE, pF, chi (mean and standard error over nreal cascade realizations)."""
     if generator is None:
+        import os, sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
         from multifrac import multifrac
         def generator(seed):
             f, _ = multifrac(weights, dim=2, size=2, levels=J - 1, verbose=False, seed=seed)
