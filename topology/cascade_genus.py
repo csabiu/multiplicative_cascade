@@ -88,12 +88,12 @@ class GenusTheory:
             pos, pr = ac[k]
             return sum(p * ev(g, a) for a, p in zip(pos, pr))
 
-        def G(j, g):                        # adjacent pair, eq. (6)
+        def G(j, g):                        # adjacent pair, eq. (7)
             dn = 2 ** j - 1
             return sum((2 ** k / dn) * inner(k, ('P2', ('S', j - 1 - k, g) if j - 1 - k > 0 else g))
                        for k in range(j))
 
-        def F(j, g):                        # 2x2 plaquette, eq. (8)
+        def F(j, g):                        # 2x2 plaquette, eq. (9)
             if j == 1:
                 v = 1.0
                 for c in C:
